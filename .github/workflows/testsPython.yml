@@ -1,3 +1,4 @@
+---
 ###############################################################################
 # Workflow: Python Unit Tests
 #
@@ -7,30 +8,38 @@
 # Triggers:
 #   - On push to main or next branches (Python files only)
 #   - On pull requests affecting Python files
-#   - Manual dispatch
+#   - Manual dispatch (with optional `notify_user` input)
 #
 # Key Steps:
 #   1. Checkout repository code
 #   2. Set up Python environment using a custom action
 #   3. Run unit tests and report results
+#   4. Notify on failure by opening a GitHub issue tagged at `notify_user`
 #
 # Notes:
 #   - secrets are set in https://github.com/smarter-sh/smarter/settings/secrets/actions
 #   - Integrates with Codecov for coverage reporting
+#   - The notifications job uses the auto-provided GITHUB_TOKEN, so no extra
+#     secrets are needed for the issue-creation notification.
 ###############################################################################
 name: Python Unit Tests
 
 on:
-  workflow_dispatch: # Allows the workflow to be manually triggered from the GitHub Actions tab
-  pull_request: #
-    paths: # Trigger workflow on pull requests, but
-      - "**.py" # only if Python files are changed
+  workflow_dispatch:           # Allows the workflow to be manually triggered from the GitHub Actions tab
+    inputs:
+      notify_user:
+        description: "GitHub username to @mention on failure (defaults to repo owner)"
+        required: false
+        default: "marvintran"
+  pull_request:                #
+    paths:                     # Trigger workflow on pull requests, but
+      - "**.py"                # only if Python files are changed
   push:
-    branches: #
-      - main #
-      - next # Trigger workflow on pushes to main and next
-    paths: # branches, but only if Python files are changed
-      - "**.py" #
+    branches:                  #
+      - main                   #
+      - next                   # Trigger workflow on pushes to main and next
+    paths:                     # branches, but only if Python files are changed
+      - "**.py"                #
 
 env:
   python-version: "3.13"
@@ -41,7 +50,7 @@ jobs:
   # This job will run on an Ubuntu runner and execute the Python
   # tests by using a custom action located in ./.github/actions/tests/python.
   python-unit-tests:
-    runs-on: ubuntu-latest # the runner (remote machine) will use Ubuntu OS
+    runs-on: ubuntu-latest     # the runner (remote machine) will use Ubuntu OS
     steps:
       - name: Checkout code
         id: checkout
@@ -63,17 +72,57 @@ jobs:
           codecov-token: "${{ secrets.CODECOV_TOKEN }}"
 
   # Job #2: Notifications (Mini-capstone assignment)
-  # This job will run after the Python unit tests and
-  # is scaffolded to facilitate sending notifications based
-  # on the test results.
+  #
+  # Runs after the Python unit tests and sends a notification on failure.
+  # `if: always()` is required so this job runs even when python-unit-tests
+  # fails — without it, GitHub Actions would skip dependent jobs on failure
+  # and the notification would never fire.
+  #
+  # On failure, this opens a GitHub issue in the repo and @mentions the
+  # configured user, which triggers an email from GitHub automatically
+  # (no SMTP secrets required). The addressee can be overridden via the
+  # `notify_user` workflow_dispatch input.
   notifications:
     needs: python-unit-tests
     runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      issues: write            # required so GITHUB_TOKEN can open issues
+      contents: read
     steps:
-      - name: Notify on test results
+      - name: Log result
         run: |
           if [ "${{ needs.python-unit-tests.result }}" == "success" ]; then
-            echo "success notifications go here"
+            echo "✅ Python unit tests passed — no notification needed."
           else
-            echo "failure notifications go here"
+            echo "❌ Python unit tests failed — opening notification issue."
           fi
+
+      - name: Open an issue on failure
+        if: needs.python-unit-tests.result != 'success'
+        uses: actions/github-script@v7
+        env:
+          NOTIFY_USER: ${{ github.event.inputs.notify_user || 'marvintran' }}
+        with:
+          script: |
+            const user = process.env.NOTIFY_USER;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `❌ Python Unit Tests failed on ${context.ref}`,
+              labels: ['ci-failure', 'automated'],
+              body: [
+                `@${user} — the **Python Unit Tests** workflow failed.`,
+                ``,
+                `| Field | Value |`,
+                `| --- | --- |`,
+                `| Workflow run | ${runUrl} |`,
+                `| Commit | \`${context.sha}\` |`,
+                `| Ref | \`${context.ref}\` |`,
+                `| Event | \`${context.eventName}\` |`,
+                `| Triggered by | @${context.actor} |`,
+                ``,
+                `Please review the run logs and address the failing tests.`
+              ].join('\n')
+            });
